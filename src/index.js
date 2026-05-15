@@ -1,6 +1,6 @@
 /**
  * YouTube Clipper Automation - Main Entry Point
- * Prototype V1: Monitor channel → Generate random clips → Upload to multiple accounts
+ * With Queue System: Monitor → Download → Clip → Queue → Scheduled Upload
  */
 
 require('dotenv').config();
@@ -14,6 +14,17 @@ const { startMonitor, manualCheck } = require('./youtube/monitor');
 const { generateViralTitle, generateABTitles } = require('./seo/title');
 const { generateDescription, generateABDescriptions } = require('./seo/description');
 const { autoCommit } = require('./autoCommit');
+const { initScheduler, addClipToQueue, startSchedulerDaemon, getQueueStatus } = require('./scheduler/uploadScheduler');
+const db = require('./database/db');
+
+// Channel name mapping (for database)
+const CHANNEL_NAMES = {
+  'UCoIiiHof6BJ85PLuLkuxuhw': 'Windah Basudara',
+  'UCrEj4d2ynysNsYttTYROXEg': 'Luthfi Halimawan',
+  'UC0KlWYEQIlR2KHS_dHfKJhA': 'DEANKT',
+  'UCzjGSL8HMCRUi1sWH5VYGjQ': 'Brando Chill & Games',
+  'UCwRHhTBcrBYhWoWQiuNDAOA': 'Top Global Miya',
+};
 
 /**
  * Clean up old clips (older than X hours)
@@ -29,7 +40,7 @@ function cleanupOldClips(maxAgeHours = 24) {
   const now = Date.now();
   const maxAgeMs = maxAgeHours * 60 * 60 * 1000;
   let deletedCount = 0;
-  
+
   const files = fs.readdirSync(clipsDir);
   for (const file of files) {
     const filePath = path.join(clipsDir, file);
@@ -49,10 +60,11 @@ function cleanupOldClips(maxAgeHours = 24) {
 }
 
 /**
- * Process a new video: download → clip → upload
+ * Process a new video: download → clip → queue (not immediate upload)
  * @param {Object} video - Video details
+ * @param {string} channelId - Channel ID
  */
-async function processVideo(video) {
+async function processVideo(video, channelId) {
   console.log(`\n========================================`);
   console.log(`Processing: ${video.title}`);
   console.log(`========================================`);
@@ -60,8 +72,10 @@ async function processVideo(video) {
   const videoId = video.id;
   const videoTitle = video.title;
   const videoDuration = parseDuration(video.duration);
+  const channelName = CHANNEL_NAMES[channelId] || channelId;
   
   console.log(`Video duration: ${videoDuration}s`);
+  console.log(`Creator: ${channelName}`);
   
   // Step 1: Download video
   console.log(`\n[1/4] Downloading video...`);
@@ -72,12 +86,6 @@ async function processVideo(video) {
     downloadedPath = downloadResult.path;
   } catch (error) {
     console.error('Download failed:', error.message);
-    // Cleanup on error
-    if (clips.length > 0) {
-      for (const clip of clips) {
-        cleanupFile(clip.path);
-      }
-    }
     return;
   }
   
@@ -96,79 +104,37 @@ async function processVideo(video) {
   } catch (error) {
     console.error('Clip generation failed:', error.message);
     cleanupFile(downloadedPath);
-    // Cleanup partial clips if any
-    if (clips.length > 0) {
-      for (const clip of clips) {
-        cleanupFile(clip.path);
-      }
-    }
     return;
   }
   
-  // Step 3: Get accounts
-  console.log(`\n[3/4] Preparing accounts...`);
-  const accounts = getAccountCredentials();
-  
-  if (accounts.length === 0) {
-    console.error('No accounts configured! Run auth.js first.');
-    cleanupFile(downloadedPath);
-    return;
-  }
-  
-  console.log(`Found ${accounts.length} account(s) for upload`);
-  
-  // Step 4: Upload clips
-  console.log(`\n[4/4] Uploading clips...`);
+  // Step 3: Add clips to queue (instead of immediate upload)
+  console.log(`\n[3/4] Adding clips to queue...`);
   
   for (const clip of clips) {
-    console.log(`\n--- Uploading clip ${clip.index} ---`);
+    console.log(`\n--- Adding clip ${clip.index} to queue ---`);
     
-    // SEO-optimized title and description (Indonesian - target market)
-    const seoTitle = generateViralTitle(videoTitle, clip.index, { language: 'id' });
-    const seoDescription = generateDescription(videoTitle, videoId, { language: 'id' });
+    // Add to database queue
+    addClipToQueue(
+      videoId,
+      videoTitle,
+      channelId,
+      channelName,
+      clip.path,
+      clip.duration
+    );
     
-    const metadata = {
-      title: seoTitle,
-      description: seoDescription,
-      tags: config.upload.tags,
-      privacy: config.upload.privacy,
-    };
-    
-    try {
-      const results = await uploadToMultipleAccounts(
-        clip.path,
-        accounts,
-        metadata
-      );
-      
-      // Print results
-      results.forEach(result => {
-        if (result.success) {
-          console.log(`✓ ${result.account}: ${result.url}`);
-        } else {
-          console.log(`✗ ${result.account}: ${result.error}`);
-        }
-      });
-    } catch (error) {
-      console.error(`Upload failed for clip ${clip.index}:`, error.message);
-    }
+    console.log(`✓ Added to queue: ${videoTitle}`);
   }
   
-  // Cleanup
+  // Cleanup video file (keep clips for scheduled upload)
   console.log(`\nCleaning up...`);
   cleanupFile(downloadedPath);
   
-  // Cleanup clips after upload
-  console.log(`\nCleaning up clips...`);
-  for (const clip of clips) {
-    cleanupFile(clip.path);
-  }
+  // Keep clips - they will be uploaded later
+  console.log(`Clips saved for scheduled upload at 23:00`);
   
   console.log(`\n========================================`);
-  console.log(`Processing complete!`);
-  // Auto-commit to GitHub
-  console.log(`\nAuto-committing to GitHub...`);
-  await autoCommit(`New clip uploaded: ${videoTitle}`);
+  console.log(`Processing complete! Clips in queue.`);
   console.log(`========================================`);
 }
 
@@ -178,51 +144,67 @@ async function processVideo(video) {
 async function main() {
   const args = process.argv.slice(2);
   
+  // Initialize database and scheduler
+  db.initDatabase();
+  initScheduler();
+  
   if (args.includes('--check')) {
-    // One-time check
     console.log('Running one-time check for new videos...');
     const newVideo = await manualCheck();
     
     if (newVideo) {
-      await processVideo(newVideo);
+      // Get channel ID from video
+      const channelId = newVideo.channelId || 'UCoIiiHof6BJ85PLuLkuxuhw';
+      await processVideo(newVideo, channelId);
     }
     process.exit(0);
   }
   
   if (args.includes('--list-channels')) {
-    // List channels
     const { listChannels } = require('./youtube/monitor');
     listChannels();
     process.exit(0);
   }
   
-  // Test with specific video ID: node src/index.js --test VIDEO_ID
   if (args.includes('--test') && args[1]) {
     const videoId = args[1];
     console.log(`Testing with video ID: ${videoId}`);
     
     const { getVideoDetailsForProcessing } = require('./downloader/video');
     const video = await getVideoDetailsForProcessing(videoId);
-    await processVideo(video);
+    const channelId = 'UCoIiiHof6BJ85PLuLkuxuhw';
+    await processVideo(video, channelId);
     process.exit(0);
   }
   
   if (args.includes('--list')) {
-    // List accounts
     listAccounts();
     process.exit(0);
   }
   
   if (args.includes('--cleanup')) {
-    // Manual cleanup
     const hours = parseInt(args[1]) || 24;
     console.log(`Cleaning up clips older than ${hours} hours...`);
     cleanupOldClips(hours);
     process.exit(0);
   }
   
+  if (args.includes('--status')) {
+    const status = getQueueStatus();
+    console.log('\n=== Queue Status ===');
+    console.log(JSON.stringify(status, null, 2));
+    process.exit(0);
+  }
+  
+  if (args.includes('--upload')) {
+    const { runScheduledUpload } = require('./scheduler/uploadScheduler');
+    await runScheduledUpload();
+    process.exit(0);
+  }
+  
   // Start monitoring
   console.log('YouTube Clipper Automation - Starting...\n');
+  console.log('Mode: Queue System (clips will be uploaded at 23:00)');
   
   // Cleanup old clips on startup
   cleanupOldClips(24);
@@ -238,10 +220,13 @@ async function main() {
     console.log(`✓ ${accounts.length} account(s) configured`);
   }
   
+  // Start scheduler daemon
+  startSchedulerDaemon();
+  
   // Start monitor
   await startMonitor(async (video, channelId) => {
     console.log(`Processing video from channel: ${channelId}`);
-    await processVideo(video);
+    await processVideo(video, channelId);
   });
   
   console.log('\nMonitoring started. Press Ctrl+C to stop.');
