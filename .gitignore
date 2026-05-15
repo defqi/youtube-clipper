@@ -1,0 +1,7 @@
+node_modules/
+clips/
+*.mp4
+*.env
+credentials/
+*.log
+.DS_Store
