@@ -156,26 +156,41 @@ function getChannelIdByName(name) {
 /**
  * Get recommended upload time based on past performance
  * Analyzes when shorts get most views
+ * Returns time in WIB (UTC+7)
  */
 async function getRecommendedUploadTime() {
   const shorts = db.getUploadedShorts(100);
   
-  // Group by upload hour
+  if (shorts.length === 0) {
+    // Default: 20:00 WIB (prime time)
+    return {
+      recommendedHour: 20,
+      recommendedMinute: 0,
+      averageViews: 0,
+      hourlyStats: {},
+      reason: 'No data yet, using prime time',
+    };
+  }
+  
+  // Group by upload hour (convert to WIB)
   const hourStats = {};
   
   for (const short of shorts) {
-    const hour = new Date(short.upload_date).getHours();
+    // Convert to WIB (UTC+7)
+    const uploadDate = new Date(short.upload_date);
+    const wibHour = (uploadDate.getUTCHours() + 7) % 24;
     
-    if (!hourStats[hour]) {
-      hourStats[hour] = { totalViews: 0, count: 0 };
+    if (!hourStats[wibHour]) {
+      hourStats[wibHour] = { totalViews: 0, count: 0 };
     }
     
-    hourStats[hour].totalViews += short.views;
-    hourStats[hour].count++;
+    hourStats[wibHour].totalViews += short.views;
+    hourStats[wibHour].count++;
   }
   
   // Calculate average views per hour
-  let bestHour = 23;
+  let bestHour = 20;
+  let bestMinute = 0;
   let bestAvg = 0;
   
   for (const [hour, stats] of Object.entries(hourStats)) {
@@ -186,10 +201,18 @@ async function getRecommendedUploadTime() {
     }
   }
   
+  // If no clear winner, use prime time
+  if (bestAvg === 0) {
+    bestHour = 20;
+    bestMinute = 0;
+  }
+  
   return {
     recommendedHour: bestHour,
+    recommendedMinute: bestMinute,
     averageViews: bestAvg,
     hourlyStats: hourStats,
+    reason: `Best performing hour in WIB`,
   };
 }
 

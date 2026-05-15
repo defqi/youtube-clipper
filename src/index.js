@@ -146,7 +146,7 @@ async function main() {
   
   // Initialize database and scheduler
   db.initDatabase();
-  initScheduler();
+  await initScheduler();
   
   if (args.includes('--check')) {
     console.log('Running one-time check for new videos...');

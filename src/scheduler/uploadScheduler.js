@@ -16,9 +16,17 @@ const fs = require('fs');
 /**
  * Initialize scheduler
  */
-function initScheduler() {
+async function initScheduler() {
   db.initDatabase();
+  
+  // Update schedule based on analytics
+  const recommended = await analytics.getRecommendedUploadTime();
+  const scheduleTime = `${recommended.recommendedHour}:${String(recommended.recommendedMinute).padStart(2, '0')}`;
+  
+  db.updateSchedule(scheduleTime, 7);
+  
   console.log('Scheduler initialized');
+  console.log(`Recommended upload time: ${scheduleTime} WIB (${recommended.reason})`);
 }
 
 /**
@@ -166,8 +174,10 @@ function getQueueStatus() {
 /**
  * Start scheduler daemon
  * Checks every minute if it's time to run
+ * Uses recommended time from analytics (WIB)
  */
 let schedulerInterval = null;
+let lastUploadDate = null;
 
 function startSchedulerDaemon() {
   if (schedulerInterval) {
@@ -178,16 +188,29 @@ function startSchedulerDaemon() {
   console.log('Starting scheduler daemon...');
   
   schedulerInterval = setInterval(async () => {
+    // Get current time in WIB (UTC+7)
     const now = new Date();
-    const schedule = db.getSchedule();
+    const wibHour = (now.getUTCHours() + 7) % 24;
+    const wibMinute = now.getUTCMinutes();
     
-    if (!schedule || !schedule.enabled) return;
-    
-    const [hour, minute] = schedule.schedule_time.split(':').map(Number);
+    // Get recommended time from analytics
+    const recommended = await analytics.getRecommendedUploadTime();
+    const recHour = recommended.recommendedHour;
+    const recMinute = recommended.recommendedMinute || 0;
     
     // Check if it's time (within 1 minute window)
-    if (now.getHours() === hour && now.getMinutes() === minute) {
-      console.log(`\nScheduled time reached: ${schedule.schedule_time}`);
+    if (wibHour === recHour && wibMinute === recMinute) {
+      // Prevent double upload on same day
+      const today = now.toDateString();
+      if (lastUploadDate === today) {
+        console.log('Already uploaded today, skipping...');
+        return;
+      }
+      
+      console.log(`\nScheduled time reached: ${recHour}:${recMinute} WIB`);
+      console.log(`Recommended by analytics: ${recommended.reason}`);
+      lastUploadDate = today;
+      
       await runScheduledUpload();
     }
   }, 60000); // Check every minute
