@@ -13,6 +13,7 @@ const { getAccountCredentials, listAccounts } = require('./accounts/manager');
 const { startMonitor, manualCheck } = require('./youtube/monitor');
 const { generateViralTitle, generateABTitles } = require('./seo/title');
 const { generateDescription, generateABDescriptions } = require('./seo/description');
+const { autoCommit } = require('./autoCommit');
 
 /**
  * Clean up old clips (older than X hours)
@@ -165,6 +166,9 @@ async function processVideo(video) {
   
   console.log(`\n========================================`);
   console.log(`Processing complete!`);
+  // Auto-commit to GitHub
+  console.log(`\nAuto-committing to GitHub...`);
+  await autoCommit(`New clip uploaded: ${videoTitle}`);
   console.log(`========================================`);
 }
 
